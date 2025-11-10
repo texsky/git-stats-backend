@@ -5,7 +5,25 @@ const fs = require('fs-extra');
 const path = require('path');
 
 const app = express();
-app.use(cors());
+
+// CORS: allow frontend to call this API and handle preflight
+// Temporarily reflect origin for debugging. After verifying, switch to an allowlist via env.
+const corsOptions = {
+  origin: true, // reflect the request Origin header
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  // Do not set allowedHeaders: cors will echo Access-Control-Request-Headers automatically
+  optionsSuccessStatus: 204,
+  // credentials: true, // enable only if sending cookies/auth from the browser
+};
+app.use(cors(corsOptions));
+// Handle preflight for all routes without using '*' (not supported by Express 5 router)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 app.use(express.json());
 
 const REPO_DIR = path.join(__dirname, 'cloned_repo');
@@ -25,12 +43,56 @@ function initGit() {
   return false;
 }
 
+// Normalize and validate repository URL (prevent SSRF and common mistakes)
+function normalizeRepoUrl(input) {
+  // Allow SSH urls like git@github.com:user/repo.git as-is
+  if (/^git@[^:]+:[^\s]+\.git$/i.test(input)) {
+    return input;
+  }
+
+  // Only allow https clone from known hosts
+  const allowedHosts = new Set(['github.com', 'gitlab.com', 'bitbucket.org']);
+  let u;
+  try {
+    u = new URL(input);
+  } catch {
+    throw new Error('Invalid URL. Use a full https Git URL, e.g., https://github.com/user/repo or https://github.com/user/repo.git');
+  }
+
+  if (!['https:'].includes(u.protocol)) {
+    throw new Error('Only https clone URLs are allowed.');
+  }
+  if (!allowedHosts.has(u.hostname)) {
+    throw new Error(`Host not allowed: ${u.hostname}. Allowed: github.com, gitlab.com, bitbucket.org`);
+  }
+
+  // Expect path like /owner/repo[.git][/...]
+  const parts = u.pathname.split('/').filter(Boolean);
+  if (parts.length < 2) {
+    throw new Error('URL must be of the form https://host/owner/repo');
+  }
+  const owner = parts[0];
+  const repoRaw = parts[1];
+  const repo = repoRaw.endsWith('.git') ? repoRaw.slice(0, -4) : repoRaw;
+  u.pathname = `/${owner}/${repo}.git`;
+  u.search = '';
+  u.hash = '';
+  return u.toString();
+}
+
 // Clone repository
 app.post('/api/clone', async (req, res) => {
   const { url } = req.body;
   
   if (!url) {
     return res.status(400).json({ error: 'Repository URL is required' });
+  }
+
+  let normalizedUrl;
+  try {
+    normalizedUrl = normalizeRepoUrl(url);
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid repository URL', details: e.message });
   }
 
   try {
@@ -40,12 +102,12 @@ app.post('/api/clone', async (req, res) => {
       git = null;
     }
 
-    console.log('Cloning repository...');
-    await simpleGit().clone(url, REPO_DIR, ['--depth', '50']); // Shallow clone for faster cloning
+    console.log('Cloning repository...', normalizedUrl);
+    await simpleGit().clone(normalizedUrl, REPO_DIR, ['--depth', '50']); // Shallow clone for faster cloning
     initGit();
     
     console.log('Repository cloned successfully');
-    res.json({ message: 'Repository Fetched successfully' });
+    res.json({ message: 'Repository fetched successfully', normalizedUrl });
   } catch (error) {
     console.error('Clone error:', error);
     res.status(500).json({ error: 'Failed to clone repository', details: error.message });
@@ -251,8 +313,18 @@ app.delete('/api/delete', async (req, res) => {
   }
 });
 
-const PORT = 9000;
-app.listen(PORT, () => {
+// Simple health check
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
+});
+
+// Root health for PaaS health checks
+app.get('/', (req, res) => {
+  res.send('OK');
+});
+
+const PORT = process.env.PORT || 9000;
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend running on port ${PORT}`);
   // Initialize git if repo already exists
   initGit();
