@@ -1,0 +1,9 @@
+node_modules
+cloned_repo
+npm-debug.log*
+yarn-error.log*
+.dockerignore
+Dockerfile
+.git
+.gitignore
+.env*
