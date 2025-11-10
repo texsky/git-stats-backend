@@ -6,8 +6,9 @@ const path = require('path');
 
 const app = express();
 app.use(cors({
-  origin:['https://nxzen.blackbucks.me/']
+  origin:['https://nxzen.blackbucks.me/','http://localhost:3000'],
 }));
+
 app.use(express.json());
 
 const REPO_DIR = path.join(__dirname, 'cloned_repo');
