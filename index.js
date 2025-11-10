@@ -7,16 +7,26 @@ const path = require('path');
 const app = express();
 
 // CORS: allow frontend to call this API and handle preflight
-// Temporarily reflect origin for debugging. After verifying, switch to an allowlist via env.
+// Use an allowlist driven by env var; fall back to localhost and known prod domain.
+const parseOrigins = (s) => (s || '').split(',').map(o => o.trim()).filter(Boolean);
+const defaultAllowed = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'https://nxzen.blackbucks.me',
+];
+const allowedOrigins = parseOrigins(process.env.ALLOWED_ORIGINS).concat(defaultAllowed);
 const corsOptions = {
-  origin: true, // reflect the request Origin header
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // curl/server-to-server
+    return cb(null, allowedOrigins.includes(origin));
+  },
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   // Do not set allowedHeaders: cors will echo Access-Control-Request-Headers automatically
   optionsSuccessStatus: 204,
   // credentials: true, // enable only if sending cookies/auth from the browser
 };
 app.use(cors(corsOptions));
-// Handle preflight for all routes without using '*' (not supported by Express 5 router)
+// Handle preflight for all routes (Express 5 compatible)
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
