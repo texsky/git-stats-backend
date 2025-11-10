@@ -5,9 +5,7 @@ const fs = require('fs-extra');
 const path = require('path');
 
 const app = express();
-app.use(cors({
-  origin:['https://nxzen.blackbucks.me/','http://localhost:3000'],
-}));
+app.use(cors());
 
 app.use(express.json());
 
