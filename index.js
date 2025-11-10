@@ -5,35 +5,9 @@ const fs = require('fs-extra');
 const path = require('path');
 
 const app = express();
-
-// CORS: allow frontend to call this API and handle preflight
-// Use an allowlist driven by env var; fall back to localhost and known prod domain.
-const parseOrigins = (s) => (s || '').split(',').map(o => o.trim()).filter(Boolean);
-const defaultAllowed = [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'https://nxzen.blackbucks.me',
-];
-const allowedOrigins = parseOrigins(process.env.ALLOWED_ORIGINS).concat(defaultAllowed);
-const corsOptions = {
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // curl/server-to-server
-    return cb(null, allowedOrigins.includes(origin));
-  },
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  // Do not set allowedHeaders: cors will echo Access-Control-Request-Headers automatically
-  optionsSuccessStatus: 204,
-  // credentials: true, // enable only if sending cookies/auth from the browser
-};
-app.use(cors(corsOptions));
-// Handle preflight for all routes (Express 5 compatible)
-app.use((req, res, next) => {
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-  next();
-});
-
+app.use(cors({
+  origin:['https://nxzen.blackbucks.me/']
+}));
 app.use(express.json());
 
 const REPO_DIR = path.join(__dirname, 'cloned_repo');
@@ -53,56 +27,12 @@ function initGit() {
   return false;
 }
 
-// Normalize and validate repository URL (prevent SSRF and common mistakes)
-function normalizeRepoUrl(input) {
-  // Allow SSH urls like git@github.com:user/repo.git as-is
-  if (/^git@[^:]+:[^\s]+\.git$/i.test(input)) {
-    return input;
-  }
-
-  // Only allow https clone from known hosts
-  const allowedHosts = new Set(['github.com', 'gitlab.com', 'bitbucket.org']);
-  let u;
-  try {
-    u = new URL(input);
-  } catch {
-    throw new Error('Invalid URL. Use a full https Git URL, e.g., https://github.com/user/repo or https://github.com/user/repo.git');
-  }
-
-  if (!['https:'].includes(u.protocol)) {
-    throw new Error('Only https clone URLs are allowed.');
-  }
-  if (!allowedHosts.has(u.hostname)) {
-    throw new Error(`Host not allowed: ${u.hostname}. Allowed: github.com, gitlab.com, bitbucket.org`);
-  }
-
-  // Expect path like /owner/repo[.git][/...]
-  const parts = u.pathname.split('/').filter(Boolean);
-  if (parts.length < 2) {
-    throw new Error('URL must be of the form https://host/owner/repo');
-  }
-  const owner = parts[0];
-  const repoRaw = parts[1];
-  const repo = repoRaw.endsWith('.git') ? repoRaw.slice(0, -4) : repoRaw;
-  u.pathname = `/${owner}/${repo}.git`;
-  u.search = '';
-  u.hash = '';
-  return u.toString();
-}
-
 // Clone repository
 app.post('/api/clone', async (req, res) => {
   const { url } = req.body;
   
   if (!url) {
     return res.status(400).json({ error: 'Repository URL is required' });
-  }
-
-  let normalizedUrl;
-  try {
-    normalizedUrl = normalizeRepoUrl(url);
-  } catch (e) {
-    return res.status(400).json({ error: 'Invalid repository URL', details: e.message });
   }
 
   try {
@@ -112,12 +42,12 @@ app.post('/api/clone', async (req, res) => {
       git = null;
     }
 
-    console.log('Cloning repository...', normalizedUrl);
-    await simpleGit().clone(normalizedUrl, REPO_DIR, ['--depth', '50']); // Shallow clone for faster cloning
+    console.log('Cloning repository...');
+    await simpleGit().clone(url, REPO_DIR, ['--depth', '50']); // Shallow clone for faster cloning
     initGit();
     
     console.log('Repository cloned successfully');
-    res.json({ message: 'Repository fetched successfully', normalizedUrl });
+    res.json({ message: 'Repository Fetched successfully' });
   } catch (error) {
     console.error('Clone error:', error);
     res.status(500).json({ error: 'Failed to clone repository', details: error.message });
@@ -145,18 +75,25 @@ app.get('/api/contributors', async (req, res) => {
           commits: 0,
           additions: 0,
           deletions: 0,
-          commitHashes: []
+          commitHashes: [],
+          commitMessages: [] // { hash, message, date }
         });
       }
 
       const contributor = contributorMap.get(username);
       contributor.commits++;
       contributor.commitHashes.push(commit.hash);
+      // Store commit message metadata for display
+      contributor.commitMessages.push({
+        hash: commit.hash,
+        message: commit.message.split('\n')[0],
+        date: commit.date
+      });
 
       try {
         // Get commit stats with timeout protection
         const show = await Promise.race([
-          git.show([commit.hash, '--stat', '--format=']),
+          git.show(['--stat', '--format=', '-p', commit.hash]),
           new Promise((_, reject) => 
             setTimeout(() => reject(new Error('Timeout')), 5000)
           )
@@ -164,11 +101,32 @@ app.get('/api/contributors', async (req, res) => {
         
         const lines = show.split('\n');
         
+        // Track contributor totals and build a per-commit summary
+        let filesChanged = 0;
+        let ins = 0;
+        let del = 0;
+        const fileChanges = [];
+        
         for (const line of lines) {
-          const match = line.match(/(\d+) insertion.*?(\d+) deletion/);
-          if (match) {
-            contributor.additions += parseInt(match[1]) || 0;
-            contributor.deletions += parseInt(match[2]) || 0;
+          // Parse summary line
+          const summaryMatch = line.match(/(\d+) files? changed(?:,\s*(\d+) insertions?\(\+\))?(?:,\s*(\d+) deletions?\(-\))?/);
+          if (summaryMatch) {
+            filesChanged = parseInt(summaryMatch[1]) || filesChanged;
+            if (summaryMatch[2]) ins = parseInt(summaryMatch[2]) || ins;
+            if (summaryMatch[3]) del = parseInt(summaryMatch[3]) || del;
+          }
+          
+          // Parse per-file change counts from the --stat table
+          const fileLineMatch = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
+          if (fileLineMatch) {
+            fileChanges.push({ file: fileLineMatch[1].trim(), changes: parseInt(fileLineMatch[2]) || 0 });
+          }
+          
+          // Maintain contributor totals (fallback if summary not present)
+          const insDelMatch = line.match(/(\d+) insertion.*?(\d+) deletion/);
+          if (insDelMatch) {
+            contributor.additions += parseInt(insDelMatch[1]) || 0;
+            contributor.deletions += parseInt(insDelMatch[2]) || 0;
           } else if (line.includes('insertion')) {
             const addMatch = line.match(/(\d+) insertion/);
             if (addMatch) contributor.additions += parseInt(addMatch[1]) || 0;
@@ -176,6 +134,33 @@ app.get('/api/contributors', async (req, res) => {
             const delMatch = line.match(/(\d+) deletion/);
             if (delMatch) contributor.deletions += parseInt(delMatch[1]) || 0;
           }
+        }
+        
+        // If we parsed explicit ins/del from summary, also add to contributor totals (avoid double-counting if already added above)
+        if (ins || del) {
+          // Heuristic: only add when above loop didn't already add via combined summary (to avoid duplicates)
+          // We can't perfectly detect, so only add if contributor totals for this commit didn't change in the loop due to summary
+          // To keep it simple and safe, do nothing here; contributor totals were already updated from the lines above.
+        }
+        
+        // Attach a compact per-commit summary to the last message entry
+        const lastMsg = contributor.commitMessages[contributor.commitMessages.length - 1];
+        if (lastMsg) {
+          const topFiles = fileChanges
+            .sort((a, b) => b.changes - a.changes)
+            .slice(0, 3)
+            .map(fc => fc.file);
+          const textParts = [];
+          if (filesChanged) textParts.push(`${filesChanged} files changed`);
+          if (ins) textParts.push(`+${ins}`);
+          if (del) textParts.push(`−${del}`);
+          lastMsg.summary = {
+            text: textParts.join(', '),
+            filesChanged: filesChanged || fileChanges.length || 0,
+            insertions: ins || 0,
+            deletions: del || 0,
+            topFiles
+          };
         }
       } catch (err) {
         console.warn(`Could not fetch stats for commit ${commit.hash}:`, err.message);
@@ -219,11 +204,13 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
         // Get diff with limited context and timeout
         const diffResult = await Promise.race([
           git.show([
-            commit.hash,
             '--format=medium',
             '--unified=3', // Show 3 lines of context
             '--stat',
-            '--max-count=1'
+            '--numstat',
+            '--name-status',
+            '-p',
+            commit.hash
           ]),
           new Promise((_, reject) => 
             setTimeout(() => reject(new Error('Diff fetch timeout')), 10000)
@@ -232,6 +219,100 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
 
         // Parse the diff output
         const lines = diffResult.split('\n');
+        
+        // Build a summary from --stat/--numstat/--name-status sections
+        let filesChanged = 0;
+        let ins = 0;
+        let del = 0;
+        const fileChanges = [];
+        const numstatMap = new Map(); // file -> {insertions, deletions, binary}
+        const addedFiles = [];
+        const modifiedFiles = [];
+        const deletedFiles = [];
+        const renamedFiles = []; // {from, to}
+        for (const line of lines) {
+          // Overall summary line from --stat
+          const summaryMatch = line.match(/(\d+) files? changed(?:,\s*(\d+) insertions?\(\+\))?(?:,\s*(\d+) deletions?\(-\))?/);
+          if (summaryMatch) {
+            filesChanged = parseInt(summaryMatch[1]) || filesChanged;
+            if (summaryMatch[2]) ins = parseInt(summaryMatch[2]) || ins;
+            if (summaryMatch[3]) del = parseInt(summaryMatch[3]) || del;
+          }
+          // Per-file summary line from --stat table
+          const fileLineMatch = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
+          if (fileLineMatch) {
+            fileChanges.push({ file: fileLineMatch[1].trim(), changes: parseInt(fileLineMatch[2]) || 0 });
+          }
+          // --numstat lines: <ins>\t<del>\t<path> ("-" means binary)
+          const numstatMatch = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+          if (numstatMatch) {
+            const i = numstatMatch[1] === '-' ? 0 : parseInt(numstatMatch[1]) || 0;
+            const d = numstatMatch[2] === '-' ? 0 : parseInt(numstatMatch[2]) || 0;
+            const f = numstatMatch[3].trim();
+            numstatMap.set(f, { insertions: i, deletions: d, binary: numstatMatch[1] === '-' || numstatMatch[2] === '-' });
+          }
+          // --name-status lines: A|M|D|R<score> \t paths
+          // Rename: R100\told\tnew or R\told\tnew
+          const renameMatch = line.match(/^R\d*\t(.+)\t(.+)$/);
+          if (renameMatch) {
+            renamedFiles.push({ from: renameMatch[1].trim(), to: renameMatch[2].trim() });
+            continue;
+          }
+          const nsMatch = line.match(/^([AMDC])\t(.+)$/);
+          if (nsMatch) {
+            const status = nsMatch[1];
+            const file = nsMatch[2].trim();
+            if (status === 'A') addedFiles.push(file);
+            else if (status === 'M') modifiedFiles.push(file);
+            else if (status === 'D') deletedFiles.push(file);
+            // 'C' (copy) treat as added
+            else if (status === 'C') addedFiles.push(file);
+          }
+        }
+        // Build files detail combining name-status and numstat
+        const detailFiles = [];
+        const pushDetail = (file, kind) => {
+          const ns = numstatMap.get(file) || { insertions: 0, deletions: 0, binary: false };
+          detailFiles.push({ file, status: kind, insertions: ns.insertions, deletions: ns.deletions, binary: !!ns.binary });
+        };
+        addedFiles.forEach(f => pushDetail(f, 'A'));
+        modifiedFiles.forEach(f => pushDetail(f, 'M'));
+        deletedFiles.forEach(f => pushDetail(f, 'D'));
+        renamedFiles.forEach(({from, to}) => {
+          const ns = numstatMap.get(to) || numstatMap.get(from) || { insertions: 0, deletions: 0, binary: false };
+          detailFiles.push({ file: to, status: 'R', from, to, insertions: ns.insertions, deletions: ns.deletions, binary: !!ns.binary });
+        });
+        // Aggregate by extension
+        const byExtension = {};
+        for (const df of detailFiles) {
+          const ext = (df.file.split('/').pop() || '').split('.').slice(1).join('.') || 'noext';
+          if (!byExtension[ext]) byExtension[ext] = { files: 0, insertions: 0, deletions: 0 };
+          byExtension[ext].files += 1;
+          byExtension[ext].insertions += df.insertions || 0;
+          byExtension[ext].deletions += df.deletions || 0;
+        }
+        const summary = {
+          text: [
+            filesChanged ? `${filesChanged} files changed` : null,
+            ins ? `+${ins}` : null,
+            del ? `−${del}` : null
+          ].filter(Boolean).join(', '),
+          filesChanged: filesChanged || fileChanges.length || 0,
+          insertions: ins || 0,
+          deletions: del || 0,
+          topFiles: fileChanges.sort((a,b)=>b.changes-a.changes).slice(0,3).map(x=>x.file),
+          details: {
+            counts: {
+              addedFiles: addedFiles.length,
+              modifiedFiles: modifiedFiles.length,
+              deletedFiles: deletedFiles.length,
+              renamedFiles: renamedFiles.length
+            },
+            files: detailFiles.sort((a,b)=> (b.insertions+b.deletions) - (a.insertions+a.deletions)),
+            byExtension
+          }
+        };
+        
         const changes = [];
         let inDiff = false;
         let lineCount = 0;
@@ -263,6 +344,7 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
           commit: commit.hash.substring(0, 7),
           message: commit.message.split('\n')[0], // First line only
           date: commit.date,
+          summary,
           changes: changes
         });
 
@@ -276,6 +358,13 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
           commit: commit.hash.substring(0, 7),
           message: commit.message.split('\n')[0],
           date: commit.date,
+          summary: {
+            text: `Error loading summary: ${err.message}`,
+            filesChanged: 0,
+            insertions: 0,
+            deletions: 0,
+            topFiles: []
+          },
           changes: [
             `// Error loading changes: ${err.message}`,
             '// This commit may have too many changes or contain binary files'
@@ -323,18 +412,8 @@ app.delete('/api/delete', async (req, res) => {
   }
 });
 
-// Simple health check
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
-});
-
-// Root health for PaaS health checks
-app.get('/', (req, res) => {
-  res.send('OK');
-});
-
-const PORT = process.env.PORT || 9000;
-app.listen(PORT, '0.0.0.0', () => {
+const PORT = 9000;
+app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
   // Initialize git if repo already exists
   initGit();
