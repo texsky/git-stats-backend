@@ -41,7 +41,7 @@ app.post('/api/clone', async (req, res) => {
     }
 
     console.log('Cloning repository...');
-    await simpleGit().clone(url, REPO_DIR, ['--depth', '50']); // Shallow clone for faster cloning
+    await simpleGit().clone(url, REPO_DIR); // Full clone to include all history
     initGit();
     
     console.log('Repository cloned successfully');
@@ -137,8 +137,8 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
 
     const diffs = [];
     
-    // Limit to last 5 commits to avoid overwhelming the response
-    const commitsToProcess = userCommits.slice(0, 5);
+    // Process all commits for the user
+    const commitsToProcess = userCommits;
 
     for (const commit of commitsToProcess) {
       try {
@@ -162,29 +162,19 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
         const lines = diffResult.split('\n');
         const changes = [];
         let inDiff = false;
-        let lineCount = 0;
-        const maxLines = 200; // Limit lines per commit
 
         for (const line of lines) {
-          // Start capturing after the commit message
+          // Start capturing at first file diff header
           if (line.startsWith('diff --git')) {
             inDiff = true;
           }
-          
-          if (inDiff && lineCount < maxLines) {
-            // Only include meaningful diff lines
-            if (line.startsWith('+') || line.startsWith('-') || 
-                line.startsWith('@@') || line.startsWith('diff')) {
-              changes.push(line);
-              lineCount++;
-            }
+          if (inDiff) {
+            changes.push(line);
           }
         }
 
         if (changes.length === 0) {
           changes.push('// No code changes to display (possibly binary files or large changes)');
-        } else if (lineCount >= maxLines) {
-          changes.push('... (output truncated - too many changes)');
         }
 
         diffs.push({
