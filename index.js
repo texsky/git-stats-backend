@@ -158,30 +158,43 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
           )
         ]);
 
-        // Parse the diff output
+        // Parse the diff output and drop node_modules files
         const lines = diffResult.split('\n');
-        const changes = [];
-        let inDiff = false;
+        const fileBlocks = [];
+        let current = null;
 
         for (const line of lines) {
-          // Start capturing at first file diff header
-          if (line.startsWith('diff --git')) {
-            inDiff = true;
+          if (line.startsWith('diff --git ')) {
+            if (current) fileBlocks.push(current);
+            const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+            const aPath = match ? match[1] : '';
+            const bPath = match ? match[2] : '';
+            current = { aPath, bPath, lines: [line] };
+          } else if (current) {
+            current.lines.push(line);
           }
-          if (inDiff) {
-            changes.push(line);
-          }
+        }
+        if (current) fileBlocks.push(current);
+
+        // Filter out node_modules changes
+        const filteredBlocks = fileBlocks.filter(b => {
+          const aNM = b.aPath.includes('node_modules/');
+          const bNM = b.bPath.includes('node_modules/');
+          return !(aNM || bNM);
+        });
+
+        // If all changes are in node_modules, skip this commit entirely
+        if (filteredBlocks.length === 0) {
+          continue;
         }
 
-        if (changes.length === 0) {
-          changes.push('// No code changes to display (possibly binary files or large changes)');
-        }
+        const changes = filteredBlocks.flatMap(b => b.lines);
 
         diffs.push({
           commit: commit.hash.substring(0, 7),
           message: commit.message.split('\n')[0], // First line only
           date: commit.date,
-          changes: changes
+          changes
         });
 
         console.log(`Processed commit ${commit.hash.substring(0, 7)} with ${changes.length} change lines`);
