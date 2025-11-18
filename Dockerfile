@@ -16,10 +16,6 @@ RUN npm install
 # Copy the rest of your backend files
 COPY . .
 
-# Copy .env file into container (optional — only if you want .env inside image)
-# Recommended only for development. Avoid in production because it exposes secrets.
-COPY .env .env
-
 # Expose backend port
 EXPOSE 9000
 
