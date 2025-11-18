@@ -7,16 +7,20 @@ RUN apt-get update && apt-get install -y git
 # Set working directory inside container
 WORKDIR /app
 
-# Copy only package.json and package-lock.json first (for caching)
+# Copy package.json first for better caching
 COPY package*.json ./
 
 # Install dependencies
 RUN npm install
 
-# Copy rest of the backend files
+# Copy the rest of your backend files
 COPY . .
 
-# Expose the backend port (9000 in your case)
+# Copy .env file into container (optional — only if you want .env inside image)
+# Recommended only for development. Avoid in production because it exposes secrets.
+COPY .env .env
+
+# Expose backend port
 EXPOSE 9000
 
 # Start the server

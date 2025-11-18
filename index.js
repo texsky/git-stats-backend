@@ -3,24 +3,49 @@ const cors = require('cors');
 const simpleGit = require('simple-git');
 const fs = require('fs-extra');
 const path = require('path');
-require('dotenv').config()
+const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// email
-const nodemailer = require('nodemailer');
-function buildTransport() {
-  return nodemailer.createTransport({
-    host: "mail.blackbucks.me",
-    port: 465,
-    secure: true,
-    auth: {
-      user: "contact@blackbucks.me",
-      pass: "uqbmxqklvnwuqxdn",
-    }
-  });
+// AWS SES Configuration
+const sesClient = new SESClient({
+  region: process.env.AWS_REGION || 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
+
+// Email sending function using AWS SES
+async function sendEmailWithSES({ from, to, subject, text, html }) {
+  const params = {
+    Source: from,
+    Destination: {
+      ToAddresses: Array.isArray(to) ? to : [to],
+    },
+    Message: {
+      Subject: {
+        Data: subject,
+        Charset: 'UTF-8',
+      },
+      Body: {
+        Text: {
+          Data: text,
+          Charset: 'UTF-8',
+        },
+        Html: {
+          Data: html,
+          Charset: 'UTF-8',
+        },
+      },
+    },
+  };
+
+  const command = new SendEmailCommand(params);
+  return await sesClient.send(command);
 }
 
 const REPO_DIR = path.join(__dirname, 'cloned_repo');
@@ -43,7 +68,7 @@ function initGit() {
 // Clone repository
 app.post('/api/clone', async (req, res) => {
   const { url } = req.body;
-
+  
   if (!url) {
     return res.status(400).json({ error: 'Repository URL is required' });
   }
@@ -58,7 +83,7 @@ app.post('/api/clone', async (req, res) => {
     console.log('Cloning repository...');
     await simpleGit().clone(url, REPO_DIR); // Full clone to include all history
     initGit();
-
+    
     console.log('Repository cloned successfully');
     res.json({ message: 'Repository Fetched successfully' });
   } catch (error) {
@@ -81,7 +106,7 @@ app.get('/api/contributors', async (req, res) => {
     // Process each commit
     for (const commit of log.all) {
       const username = commit.author_name;
-
+      
       if (!contributorMap.has(username)) {
         contributorMap.set(username, {
           username,
@@ -100,13 +125,13 @@ app.get('/api/contributors', async (req, res) => {
         // Get commit stats with timeout protection
         const show = await Promise.race([
           git.show([commit.hash, '--stat', '--format=']),
-          new Promise((_, reject) =>
+          new Promise((_, reject) => 
             setTimeout(() => reject(new Error('Timeout')), 5000)
           )
         ]);
-
+        
         const lines = show.split('\n');
-
+        
         for (const line of lines) {
           const match = line.match(/(\d+) insertion.*?(\d+) deletion/);
           if (match) {
@@ -151,14 +176,14 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
     const userCommits = log.all.filter(c => c.author_name === username);
 
     const diffs = [];
-
+    
     // Process all commits for the user
     const commitsToProcess = userCommits;
 
     for (const commit of commitsToProcess) {
       try {
         console.log(`Processing commit ${commit.hash}...`);
-
+        
         // Get diff with limited context and timeout
         const diffResult = await Promise.race([
           git.show([
@@ -168,7 +193,7 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
             '--stat',
             '--max-count=1'
           ]),
-          new Promise((_, reject) =>
+          new Promise((_, reject) => 
             setTimeout(() => reject(new Error('Diff fetch timeout')), 10000)
           )
         ]);
@@ -213,10 +238,10 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
         });
 
         console.log(`Processed commit ${commit.hash.substring(0, 7)} with ${changes.length} change lines`);
-
+        
       } catch (err) {
         console.error(`Error fetching diff for commit ${commit.hash}:`, err.message);
-
+        
         // Add error info instead of failing completely
         diffs.push({
           commit: commit.hash.substring(0, 7),
@@ -241,11 +266,11 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
 
     console.log(`Returning ${diffs.length} diffs for ${username}`);
     res.json(diffs);
-
+    
   } catch (error) {
     console.error('Error fetching diffs:', error);
-    res.status(500).json({
-      error: 'Failed to fetch code changes',
+    res.status(500).json({ 
+      error: 'Failed to fetch code changes', 
       details: error.message,
       suggestion: 'The repository may be too large or the commits contain many changes. Try with a smaller repository.'
     });
@@ -269,38 +294,37 @@ app.delete('/api/delete', async (req, res) => {
   }
 });
 
-// Registration email endpoint
+// Registration email endpoint with AWS SES
 app.post('/api/registration-email', async (req, res) => {
   try {
     const { teamName, theme, members, submissionLink } = req.body || {};
     console.log('[mail] request', { teamName, theme, membersCount: Array.isArray(members) ? members.length : null, submissionLink });
+    
     if (!teamName || !theme || !Array.isArray(members)) {
       console.error('[mail] missing required fields');
       return res.status(400).json({ error: 'Missing fields teamName/theme/members' });
     }
-    const transport = buildTransport();
-    if (!transport) {
-      console.warn('[mail] transport not configured; skipping send');
-      return res.json({ status: 'skipped', reason: 'transport not configured' });
+
+    // Verify AWS credentials are configured
+    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
+      console.error('[mail] AWS credentials not configured');
+      return res.status(500).json({ error: 'AWS SES credentials not configured' });
     }
 
     const toListArr = members.map(m => m && m.email).filter(Boolean);
-    const toList = toListArr.join(',');
-    console.log('[mail] recipients', toListArr);
-    const subject = `Hackathon Submission Instructions — ${theme}`;
+    
+    if (toListArr.length === 0) {
+      console.error('[mail] no valid email addresses found');
+      return res.status(400).json({ error: 'No valid email addresses provided' });
+    }
 
-    const contactEmail = 'contact@blackbucks.me';
+    console.log('[mail] recipients', toListArr);
+    
+    const subject = `Hackathon Submission Instructions — ${theme}`;
+    const contactEmail = process.env.CONTACT_EMAIL || 'contact@blackbucks.me';
     const organization = 'BlackBucks Group';
     const submitURL = submissionLink || 'https://taptap.blackbucks.me/hackathon/results/5729/?testType=19';
-
-    // verify SMTP
-    try {
-      const ok = await transport.verify();
-      console.log('[mail] transport.verify:', ok === true ? true : ok);
-    } catch (e) {
-      console.error('[mail] transport verify failed:', e && e.message, e && e.code);
-      return res.status(500).json({ error: 'SMTP verification failed', details: e.message, code: e.code });
-    }
+    const fromEmail = process.env.FROM_EMAIL || contactEmail;
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -392,28 +416,71 @@ app.post('/api/registration-email', async (req, res) => {
     ].join('\n');
 
     try {
-      const info = await transport.sendMail({
-        from: "contact@blackbucks.me",
-        to: toList,
-        subject,
-        text,
-        html,
+      // Send email to each recipient individually (AWS SES best practice)
+      const sendPromises = toListArr.map(email => 
+        sendEmailWithSES({
+          from: fromEmail,
+          to: email,
+          subject,
+          text,
+          html,
+        })
+      );
+
+      const results = await Promise.allSettled(sendPromises);
+      
+      const successCount = results.filter(r => r.status === 'fulfilled').length;
+      const failureCount = results.filter(r => r.status === 'rejected').length;
+      
+      console.log('[mail] sent', { 
+        total: toListArr.length, 
+        success: successCount, 
+        failed: failureCount 
       });
-      console.log('[mail] sent', { messageId: info && info.messageId, response: info && info.response });
-      return res.json({ status: 'sent', messageId: info && info.messageId });
+
+      if (failureCount > 0) {
+        const failedEmails = results
+          .map((r, i) => r.status === 'rejected' ? toListArr[i] : null)
+          .filter(Boolean);
+        
+        console.error('[mail] failed recipients', failedEmails);
+        
+        return res.status(207).json({ 
+          status: 'partial', 
+          success: successCount,
+          failed: failureCount,
+          failedEmails,
+          message: `Sent to ${successCount} of ${toListArr.length} recipients`
+        });
+      }
+
+      return res.json({ 
+        status: 'sent', 
+        count: successCount,
+        recipients: toListArr 
+      });
+      
     } catch (sendErr) {
       console.error('[mail] send failed', sendErr && sendErr.message, sendErr && sendErr.code);
-      return res.status(500).json({ error: 'Failed to send registration email', details: sendErr.message, code: sendErr.code });
+      return res.status(500).json({ 
+        error: 'Failed to send registration email', 
+        details: sendErr.message, 
+        code: sendErr.code 
+      });
     }
   } catch (err) {
     console.error('[mail] route error', err && err.message);
-    return res.status(500).json({ error: 'Failed to send registration email', details: err.message });
+    return res.status(500).json({ 
+      error: 'Failed to send registration email', 
+      details: err.message 
+    });
   }
 });
 
-const PORT = 9000;
+const PORT = process.env.PORT || 9000;
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
+  console.log(`AWS SES Region: ${process.env.AWS_REGION || 'us-east-1'}`);
   // Initialize git if repo already exists
   initGit();
 });
