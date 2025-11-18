@@ -3,49 +3,20 @@ const cors = require('cors');
 const simpleGit = require('simple-git');
 const fs = require('fs-extra');
 const path = require('path');
-const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
-require('dotenv').config();
+require('dotenv').config()
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// AWS SES Configuration
-const sesClient = new SESClient({
-  region: process.env.AWS_REGION || 'us-east-1',
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  },
-});
-
-// Email sending function using AWS SES
-async function sendEmailWithSES({ from, to, subject, text, html }) {
-  const params = {
-    Source: from,
-    Destination: {
-      ToAddresses: Array.isArray(to) ? to : [to],
-    },
-    Message: {
-      Subject: {
-        Data: subject,
-        Charset: 'UTF-8',
-      },
-      Body: {
-        Text: {
-          Data: text,
-          Charset: 'UTF-8',
-        },
-        Html: {
-          Data: html,
-          Charset: 'UTF-8',
-        },
-      },
-    },
-  };
-
-  const command = new SendEmailCommand(params);
-  return await sesClient.send(command);
+// email
+const nodemailer = require('nodemailer');
+function buildTransport() {
+  return nodemailer.createTransport({
+    service:'gmail',
+    secure:true,
+    auth: { user: 'contact@blackbucks.me', pass: 'uqbmxqklvnwuqxdn' },
+  });
 }
 
 const REPO_DIR = path.join(__dirname, 'cloned_repo');
@@ -294,37 +265,38 @@ app.delete('/api/delete', async (req, res) => {
   }
 });
 
-// Registration email endpoint with AWS SES
+// Registration email endpoint
 app.post('/api/registration-email', async (req, res) => {
   try {
     const { teamName, theme, members, submissionLink } = req.body || {};
     console.log('[mail] request', { teamName, theme, membersCount: Array.isArray(members) ? members.length : null, submissionLink });
-    
     if (!teamName || !theme || !Array.isArray(members)) {
       console.error('[mail] missing required fields');
       return res.status(400).json({ error: 'Missing fields teamName/theme/members' });
     }
-
-    // Verify AWS credentials are configured
-    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
-      console.error('[mail] AWS credentials not configured');
-      return res.status(500).json({ error: 'AWS SES credentials not configured' });
+    const transport = buildTransport();
+    if (!transport) {
+      console.warn('[mail] transport not configured; skipping send');
+      return res.json({ status: 'skipped', reason: 'transport not configured' });
     }
 
     const toListArr = members.map(m => m && m.email).filter(Boolean);
-    
-    if (toListArr.length === 0) {
-      console.error('[mail] no valid email addresses found');
-      return res.status(400).json({ error: 'No valid email addresses provided' });
-    }
-
+    const toList = toListArr.join(',');
     console.log('[mail] recipients', toListArr);
-    
     const subject = `Hackathon Submission Instructions — ${theme}`;
-    const contactEmail = process.env.CONTACT_EMAIL || 'contact@blackbucks.me';
+
+    const contactEmail = 'contact@blackbucks.me';
     const organization = 'BlackBucks Group';
     const submitURL = submissionLink || 'https://taptap.blackbucks.me/hackathon/results/5729/?testType=19';
-    const fromEmail = process.env.FROM_EMAIL || contactEmail;
+
+    // verify SMTP
+    try {
+      const ok = await transport.verify();
+      console.log('[mail] transport.verify:', ok === true ? true : ok);
+    } catch (e) {
+      console.error('[mail] transport verify failed:', e && e.message, e && e.code);
+      return res.status(500).json({ error: 'SMTP verification failed', details: e.message, code: e.code });
+    }
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -377,7 +349,7 @@ app.post('/api/registration-email', async (req, res) => {
     <p>
       Once your materials are ready, please upload them using the link below.
     </p>
-    <a href="${submitURL}" class="button">Submit Project</a>
+    <a href="${submitURL}" class="button" style="color:white;">Submit Project</a>
 
     <p>
       If you have any questions or encounter any issues, please contact us at
@@ -416,71 +388,28 @@ app.post('/api/registration-email', async (req, res) => {
     ].join('\n');
 
     try {
-      // Send email to each recipient individually (AWS SES best practice)
-      const sendPromises = toListArr.map(email => 
-        sendEmailWithSES({
-          from: fromEmail,
-          to: email,
-          subject,
-          text,
-          html,
-        })
-      );
-
-      const results = await Promise.allSettled(sendPromises);
-      
-      const successCount = results.filter(r => r.status === 'fulfilled').length;
-      const failureCount = results.filter(r => r.status === 'rejected').length;
-      
-      console.log('[mail] sent', { 
-        total: toListArr.length, 
-        success: successCount, 
-        failed: failureCount 
+      const info = await transport.sendMail({
+        from: "contact@blackbucks.me",
+        to: toList,
+        subject,
+        text,
+        html,
       });
-
-      if (failureCount > 0) {
-        const failedEmails = results
-          .map((r, i) => r.status === 'rejected' ? toListArr[i] : null)
-          .filter(Boolean);
-        
-        console.error('[mail] failed recipients', failedEmails);
-        
-        return res.status(207).json({ 
-          status: 'partial', 
-          success: successCount,
-          failed: failureCount,
-          failedEmails,
-          message: `Sent to ${successCount} of ${toListArr.length} recipients`
-        });
-      }
-
-      return res.json({ 
-        status: 'sent', 
-        count: successCount,
-        recipients: toListArr 
-      });
-      
+      console.log('[mail] sent', { messageId: info && info.messageId, response: info && info.response });
+      return res.json({ status: 'sent', messageId: info && info.messageId });
     } catch (sendErr) {
       console.error('[mail] send failed', sendErr && sendErr.message, sendErr && sendErr.code);
-      return res.status(500).json({ 
-        error: 'Failed to send registration email', 
-        details: sendErr.message, 
-        code: sendErr.code 
-      });
+      return res.status(500).json({ error: 'Failed to send registration email', details: sendErr.message, code: sendErr.code });
     }
   } catch (err) {
     console.error('[mail] route error', err && err.message);
-    return res.status(500).json({ 
-      error: 'Failed to send registration email', 
-      details: err.message 
-    });
+    return res.status(500).json({ error: 'Failed to send registration email', details: err.message });
   }
 });
 
-const PORT = process.env.PORT || 9000;
+const PORT = 9000;
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
-  console.log(`AWS SES Region: ${process.env.AWS_REGION || 'us-east-1'}`);
   // Initialize git if repo already exists
   initGit();
 });
