@@ -12,7 +12,6 @@ app.use(express.json());
 // email
 const nodemailer = require('nodemailer');
 function buildTransport() {
-  const { SMTP_USER, SMTP_PASS } = process.env;
   return nodemailer.createTransport({
     service:'gmail',
     secure:true,
@@ -390,7 +389,7 @@ app.post('/api/registration-email', async (req, res) => {
 
     try {
       const info = await transport.sendMail({
-        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        from: "contact@blackbucks.me",
         to: toList,
         subject,
         text,
