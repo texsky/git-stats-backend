@@ -13,9 +13,13 @@ app.use(express.json());
 const nodemailer = require('nodemailer');
 function buildTransport() {
   return nodemailer.createTransport({
-    service:'gmail',
-    secure:true,
-    auth: { user: 'contact@blackbucks.me', pass: 'uqbmxqklvnwuqxdn' },
+    host: "mail.blackbucks.me",
+    port: 465,
+    secure: true,
+    auth: {
+      user: "contact@blackbucks.me",
+      pass: "your email password",
+    }
   });
 }
 
@@ -39,7 +43,7 @@ function initGit() {
 // Clone repository
 app.post('/api/clone', async (req, res) => {
   const { url } = req.body;
-  
+
   if (!url) {
     return res.status(400).json({ error: 'Repository URL is required' });
   }
@@ -54,7 +58,7 @@ app.post('/api/clone', async (req, res) => {
     console.log('Cloning repository...');
     await simpleGit().clone(url, REPO_DIR); // Full clone to include all history
     initGit();
-    
+
     console.log('Repository cloned successfully');
     res.json({ message: 'Repository Fetched successfully' });
   } catch (error) {
@@ -77,7 +81,7 @@ app.get('/api/contributors', async (req, res) => {
     // Process each commit
     for (const commit of log.all) {
       const username = commit.author_name;
-      
+
       if (!contributorMap.has(username)) {
         contributorMap.set(username, {
           username,
@@ -96,13 +100,13 @@ app.get('/api/contributors', async (req, res) => {
         // Get commit stats with timeout protection
         const show = await Promise.race([
           git.show([commit.hash, '--stat', '--format=']),
-          new Promise((_, reject) => 
+          new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Timeout')), 5000)
           )
         ]);
-        
+
         const lines = show.split('\n');
-        
+
         for (const line of lines) {
           const match = line.match(/(\d+) insertion.*?(\d+) deletion/);
           if (match) {
@@ -147,14 +151,14 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
     const userCommits = log.all.filter(c => c.author_name === username);
 
     const diffs = [];
-    
+
     // Process all commits for the user
     const commitsToProcess = userCommits;
 
     for (const commit of commitsToProcess) {
       try {
         console.log(`Processing commit ${commit.hash}...`);
-        
+
         // Get diff with limited context and timeout
         const diffResult = await Promise.race([
           git.show([
@@ -164,7 +168,7 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
             '--stat',
             '--max-count=1'
           ]),
-          new Promise((_, reject) => 
+          new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Diff fetch timeout')), 10000)
           )
         ]);
@@ -209,10 +213,10 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
         });
 
         console.log(`Processed commit ${commit.hash.substring(0, 7)} with ${changes.length} change lines`);
-        
+
       } catch (err) {
         console.error(`Error fetching diff for commit ${commit.hash}:`, err.message);
-        
+
         // Add error info instead of failing completely
         diffs.push({
           commit: commit.hash.substring(0, 7),
@@ -237,11 +241,11 @@ app.get('/api/contributor/:username/diffs', async (req, res) => {
 
     console.log(`Returning ${diffs.length} diffs for ${username}`);
     res.json(diffs);
-    
+
   } catch (error) {
     console.error('Error fetching diffs:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch code changes', 
+    res.status(500).json({
+      error: 'Failed to fetch code changes',
       details: error.message,
       suggestion: 'The repository may be too large or the commits contain many changes. Try with a smaller repository.'
     });
