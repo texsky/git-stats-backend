@@ -18,7 +18,7 @@ function buildTransport() {
     secure: true,
     auth: {
       user: "contact@blackbucks.me",
-      pass: "your email password",
+      pass: "uqbmxqklvnwuqxdn",
     }
   });
 }
