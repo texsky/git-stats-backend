@@ -16,7 +16,7 @@ function buildTransport() {
   return nodemailer.createTransport({
     service:'gmail',
     secure:true,
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
+    auth: { user: 'contact@blackbucks.me', pass: 'uqbmxqklvnwuqxdn' },
   });
 }
 
