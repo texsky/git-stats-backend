@@ -4,6 +4,35 @@ const simpleGit = require('simple-git');
 const fs = require('fs-extra');
 const path = require('path');
 require('dotenv').config();
+const { Pool } = require('pg');
+
+// ------------------ POSTGRESQL SETUP ------------------
+
+const pool = new Pool({
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: 5432,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
+// Test the connection once
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error("❌ PostgreSQL connection error:", err.message);
+  } else {
+    console.log("✅ Connected to PostgreSQL database");
+  }
+  release();
+});
+
+// Listen for unexpected errors
+pool.on('error', (err) => {
+  console.error('❌ Unexpected error on idle PostgreSQL client:', err);
+});
 
 const app = express();
 app.use(cors());
@@ -209,6 +238,144 @@ app.delete('/api/delete', async (req, res) => {
     }
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete repository', details: error.message });
+  }
+});
+
+
+app.get('/api/submission-record/:email/:hid/:rid', (req, res) => {
+  try {
+    const { email, hid, rid } = req.params;
+
+    const userQuery = `SELECT id FROM public.user WHERE email = '${email}' LIMIT 1;`
+
+    pool.query(userQuery, (err, userResult) => {
+      if (err) {
+        return res.status(500).json({ error: 'Database query error', details: err.message });
+      }
+
+      if (userResult.rows.length === 0) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const userId = userResult.rows[0].id;
+
+
+      const query = `SELECT
+            ts.*,
+            b.id AS block_id,
+            b.title AS question_title,
+            b.problem_type AS question_type,
+            b.coding,
+            b.mcq,
+            b.subjective
+        FROM round_block_order rbo
+        JOIN block b
+            ON b.id = rbo.block_id
+        JOIN test_submission ts
+            ON ts.problem_id = b.id
+            AND ts.round_id = rbo.round_id
+        JOIN round r
+            ON r.id = rbo.round_id
+        JOIN hackathon h
+            ON h.id = r.hackathon_id
+        WHERE
+            ts.user_id = '${userId}'       -- user_id
+            AND r.id = '${rid}'         -- round_id
+            AND h.id = '${hid}'         -- hackathon_id
+        ORDER BY ts.update_at DESC
+        LIMIT 1;
+      `
+
+      pool.query(query, (err, result) => {
+        if (err) {
+          return res.status(500).json({ error: 'Database query error', details: err.message });
+        }
+
+        if (result.rows.length === 0) {
+          return res.status(404).json({ error: 'Submission record not found' });
+        }
+
+        res.json(result.rows[0].submission);
+      });
+
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch submission record', details: err.message });
+  }
+})
+
+// Bulk submission records: given list of { email, hid, rid } return GitHub links
+app.post('/api/submission-records/bulk', async (req, res) => {
+  try {
+    const items = req.body?.items;
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ error: 'items array is required' });
+    }
+
+    const results = [];
+
+    for (const item of items) {
+      const { email, hid, rid } = item || {};
+      if (!email || !hid || !rid) {
+        continue;
+      }
+
+      try {
+        const userQuery = `SELECT id FROM public.user WHERE email = '${email}' LIMIT 1;`;
+        const userResult = await pool.query(userQuery);
+
+        if (userResult.rows.length === 0) {
+          results.push({ email, hid, rid, githubLink: null, error: 'User not found' });
+          continue;
+        }
+
+        const userId = userResult.rows[0].id;
+
+        const query = `SELECT
+            ts.*,
+            b.id AS block_id,
+            b.title AS question_title,
+            b.problem_type AS question_type,
+            b.coding,
+            b.mcq,
+            b.subjective
+        FROM round_block_order rbo
+        JOIN block b
+            ON b.id = rbo.block_id
+        JOIN test_submission ts
+            ON ts.problem_id = b.id
+            AND ts.round_id = rbo.round_id
+        JOIN round r
+            ON r.id = rbo.round_id
+        JOIN hackathon h
+            ON h.id = r.hackathon_id
+        WHERE
+            ts.user_id = '${userId}'
+            AND r.id = '${rid}'
+            AND h.id = '${hid}'
+        ORDER BY ts.update_at DESC
+        LIMIT 1;`;
+
+        const submissionResult = await pool.query(query);
+        if (submissionResult.rows.length === 0) {
+          results.push({ email, hid, rid, githubLink: null, error: 'Submission record not found' });
+          continue;
+        }
+
+        const submission = submissionResult.rows[0].submission;
+        const githubLink = submission?.files?.githubLink || null;
+
+        results.push({ email, hid, rid, githubLink });
+      } catch (err) {
+        results.push({ email, hid, rid, githubLink: null, error: err.message });
+      }
+    }
+
+    res.json({ results });
+  } catch (err) {
+    console.error('Bulk submission records error:', err);
+    res.status(500).json({ error: 'Failed to fetch bulk submission records', details: err.message });
   }
 });
 
